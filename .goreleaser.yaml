@@ -1,0 +1,110 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./...
+
+builds:
+  - id: geekclaw
+    env:
+      - CGO_ENABLED=0
+    tags:
+      - stdjson
+    ldflags:
+      - -s -w
+      - -X github.com/seagosoft/geekclaw/geekclaw/config.Version={{ .Version }}
+      - -X github.com/seagosoft/geekclaw/geekclaw/config.GitCommit={{ .ShortCommit }}
+      - -X github.com/seagosoft/geekclaw/geekclaw/config.BuildTime={{ .Date }}
+      - -X github.com/seagosoft/geekclaw/geekclaw/config.GoVersion={{ .Env.GOVERSION }}
+    goos:
+      - linux
+      - windows
+      - darwin
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+      - riscv64
+      - loong64
+      - arm
+      - s390x
+      - mipsle
+    goarm:
+      - "6"
+      - "7"
+    gomips:
+      - softfloat
+    binary: geekclaw-cli
+    main: ./geekclaw
+    ignore:
+      - goos: windows
+        goarch: arm
+
+
+notarize:
+  macos:
+    - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
+      ids:
+        - geekclaw
+      sign:
+        certificate: "{{.Env.MACOS_SIGN_P12}}"
+        password: "{{.Env.MACOS_SIGN_PASSWORD}}"
+      notarize:
+        issuer_id: "{{.Env.MACOS_NOTARY_ISSUER_ID}}"
+        key_id: "{{.Env.MACOS_NOTARY_KEY_ID}}"
+        key: "{{.Env.MACOS_NOTARY_KEY}}"
+        wait: true
+        timeout: 20m
+
+archives:
+  - formats: [tar.gz]
+    # this name template makes the OS and Arch compatible with the results of `uname`.
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    # use zip for windows archives
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+nfpms:
+  - id: geekclaw
+    ids:
+      - geekclaw
+    package_name: geekclaw
+    file_name_template: >-
+      {{ .PackageName }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "arm64" }}aarch64
+      {{- else if eq .Arch "arm" }}armv{{ .Arm }}
+      {{- else }}{{ .Arch }}{{ end }}
+    vendor: geekclaw
+    homepage: https://github.com/{{ .Env.GITHUB_REPOSITORY_OWNER }}/geekclaw
+    maintainer: geekclaw contributors
+    description: geekclaw - AI-powered super-tool
+    license: MIT
+    formats:
+      - rpm
+      - deb
+    bindir: /usr/bin
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  footer: >-
+
+    ---
+
+    Released by [GoReleaser](https://github.com/goreleaser/goreleaser).

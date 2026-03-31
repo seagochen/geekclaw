@@ -1,0 +1,57 @@
+# ── Build artifacts ──────────────────────────────────────────────────────────
+build/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.syso
+
+# Compiled binaries (project root)
+/geekclaw-cli
+/picoclaw
+/picoclaw-test
+/gen-config-example
+
+# Local app environment (created by manage.py build)
+geekclaw-app/
+
+# ── Runtime data & config ────────────────────────────────────────────────────
+.env
+.env.example
+config.json
+sessions/
+
+# Workspace paths generated during tests/dev
+cmd/**/workspace
+
+# ── Test coverage ─────────────────────────────────────────────────────────────
+coverage.txt
+coverage.html
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Editors & tools ──────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.claude/
+
+# ── Plans, tasks & internal docs ─────────────────────────────────────────────
+docs/plans/
+TASKS.md
+ARCHIVE.md
+
+# ── Legacy ───────────────────────────────────────────────────────────────────
+ralph/
+.ralph/
+
+# ── Web frontend build ────────────────────────────────────────────────────────
+web/backend/dist/*
+!web/backend/dist/.gitkeep
+
+# ── Plugins ───────────────────────────────────────────────────────────────────
+plugins/
