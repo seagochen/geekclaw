@@ -131,6 +131,19 @@ func (m *Manager) dispatchOutbound(ctx context.Context) {
 				return true
 			case <-ctx.Done():
 				return false
+			default:
+				// 队列已满，记录告警后阻塞等待
+				logger.WarnCF("channels", "Outbound queue full, applying backpressure", map[string]any{
+					"channel":    msg.Channel,
+					"queue_cap":  cap(w.queue),
+					"queue_len":  len(w.queue),
+				})
+				select {
+				case w.queue <- msg:
+					return true
+				case <-ctx.Done():
+					return false
+				}
 			}
 		},
 		"Outbound dispatcher started",
@@ -152,6 +165,18 @@ func (m *Manager) dispatchOutboundMedia(ctx context.Context) {
 				return true
 			case <-ctx.Done():
 				return false
+			default:
+				logger.WarnCF("channels", "Outbound media queue full, applying backpressure", map[string]any{
+					"channel":   msg.Channel,
+					"queue_cap": cap(w.mediaQueue),
+					"queue_len": len(w.mediaQueue),
+				})
+				select {
+				case w.mediaQueue <- msg:
+					return true
+				case <-ctx.Done():
+					return false
+				}
 			}
 		},
 		"Outbound media dispatcher started",

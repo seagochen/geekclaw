@@ -166,25 +166,39 @@ func gatewayCmd(debug bool) error {
 	<-sigChan
 
 	fmt.Println("\nShutting down...")
-	if cp, ok := provider.(providers.StatefulProvider); ok {
-		cp.Close()
-	}
-	cancel()
-	msgBus.Close()
 
-	// 使用带超时的新上下文进行优雅关闭，
-	// 因为原始 ctx 已被取消。
+	// 关闭顺序至关重要：先停止消息源，再停止处理器，最后关闭总线。
+	// 错误的顺序会导致 channel 向已关闭的 bus 发送消息引发 panic。
+
+	// 1. 取消上下文，通知所有组件开始停止
+	cancel()
+
+	// 2. 使用带超时的新上下文进行优雅关闭
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
 
+	// 3. 先停止频道（消息源），确保不再有新消息进入总线
 	channelManager.StopAll(shutdownCtx)
+
+	// 4. 停止代理循环（消息消费者）
+	agentLoop.Stop()
+	agentLoop.Close()
+
+	// 5. 停止定时任务（可能产生入站消息）
+	cronService.Stop()
+
+	// 6. 最后关闭总线 — 此时所有生产者和消费者都已停止
+	msgBus.Close()
+
+	// 7. 清理其余资源
+	if cp, ok := provider.(providers.StatefulProvider); ok {
+		cp.Close()
+	}
 	for _, vp := range voicePlugins {
 		vp.Stop()
 	}
-	cronService.Stop()
 	mediaStore.Stop()
-	agentLoop.Stop()
-	agentLoop.Close()
+
 	fmt.Println("✓ Gateway stopped")
 
 	return nil

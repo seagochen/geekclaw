@@ -81,7 +81,10 @@ func (s *Server) StartContext(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		return s.server.Shutdown(context.Background())
+		// 使用带超时的 context 进行优雅关闭，避免无限等待
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return s.server.Shutdown(shutdownCtx)
 	}
 }
 
@@ -101,17 +104,19 @@ func (s *Server) SetReady(ready bool) {
 }
 
 // RegisterCheck 注册一个健康检查项。
+// checkFn 在锁外执行，避免慢检查阻塞整个健康端点。
 func (s *Server) RegisterCheck(name string, checkFn func() (bool, string)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	// 在锁外执行检查函数，避免阻塞
 	status, msg := checkFn()
+
+	s.mu.Lock()
 	s.checks[name] = Check{
 		Name:      name,
 		Status:    statusString(status),
 		Message:   msg,
 		Timestamp: time.Now(),
 	}
+	s.mu.Unlock()
 }
 
 // healthHandler 处理 /health 端点请求。

@@ -457,9 +457,12 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 	}
 
 	// 使用按会话分发的并发处理：不同会话并行，同一会话串行。
+	const workerIdleTimeout = 10 * time.Minute // worker 空闲超时后自动回收
+
 	type sessionWorker struct {
-		ch   chan bus.InboundMessage
-		done chan struct{}
+		ch     chan bus.InboundMessage
+		done   chan struct{}
+		closed atomic.Bool // 标记 channel 是否已关闭
 	}
 	var (
 		workersMu sync.Mutex
@@ -512,7 +515,9 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 			// 等待所有 worker 完成
 			workersMu.Lock()
 			for _, w := range workers {
-				close(w.ch)
+				if w.closed.CompareAndSwap(false, true) {
+					close(w.ch)
+				}
 			}
 			for _, w := range workers {
 				<-w.done
@@ -537,13 +542,31 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				workers[key] = w
 				go func(key string, w *sessionWorker) {
 					defer close(w.done)
-					for m := range w.ch {
-						processMsg(m)
+					idleTimer := time.NewTimer(workerIdleTimeout)
+					defer idleTimer.Stop()
+					for {
+						select {
+						case m, ok := <-w.ch:
+							if !ok {
+								return // channel 被关闭
+							}
+							processMsg(m)
+							// 重置空闲计时器
+							if !idleTimer.Stop() {
+								select {
+								case <-idleTimer.C:
+								default:
+								}
+							}
+							idleTimer.Reset(workerIdleTimeout)
+						case <-idleTimer.C:
+							// 空闲超时，自动回收 worker
+							workersMu.Lock()
+							delete(workers, key)
+							workersMu.Unlock()
+							return
+						}
 					}
-					// worker 空闲后自行清理
-					workersMu.Lock()
-					delete(workers, key)
-					workersMu.Unlock()
 				}(key, w)
 			}
 			workersMu.Unlock()
@@ -560,7 +583,9 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 	// 停止时清理所有 worker
 	workersMu.Lock()
 	for _, w := range workers {
-		close(w.ch)
+		if w.closed.CompareAndSwap(false, true) {
+			close(w.ch)
+		}
 	}
 	for _, w := range workers {
 		<-w.done

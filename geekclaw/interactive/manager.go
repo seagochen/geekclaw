@@ -14,10 +14,11 @@ const DefaultTimeout = 5 * time.Minute
 
 // Manager 管理交互式会话和待处理的确认请求。
 type Manager struct {
-	sessions     map[string]*Session
+	sessions      map[string]*Session
 	confirmations map[string]*ConfirmationRequest
-	plans        map[string]*ExecutionPlan
-	mu           sync.RWMutex
+	plans         map[string]*ExecutionPlan
+	mu            sync.RWMutex
+	stopCleanup   chan struct{} // 停止后台清理
 }
 
 // NewManager 创建一个新的交互管理器。
@@ -26,6 +27,30 @@ func NewManager() *Manager {
 		sessions:      make(map[string]*Session),
 		confirmations: make(map[string]*ConfirmationRequest),
 		plans:         make(map[string]*ExecutionPlan),
+	}
+}
+
+// StartCleanup 启动后台定期清理过期的确认请求和执行计划。
+func (m *Manager) StartCleanup(interval time.Duration) {
+	m.stopCleanup = make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-m.stopCleanup:
+				return
+			case <-ticker.C:
+				m.CleanupExpired()
+			}
+		}
+	}()
+}
+
+// StopCleanup 停止后台清理。
+func (m *Manager) StopCleanup() {
+	if m.stopCleanup != nil {
+		close(m.stopCleanup)
 	}
 }
 
@@ -107,14 +132,13 @@ func (m *Manager) RequestConfirmation(
 	m.confirmations[confID] = conf
 	session := m.getOrCreateSessionLocked(sessionKey)
 	session.PendingConfirmation = conf
-	m.mu.Unlock()
-
-	// 添加到会话历史
+	// 在锁内添加到会话历史，避免竞态
 	session.AddInteraction(Interaction{
 		Type:      "confirmation_request",
 		Content:   message,
 		Timestamp: time.Now(),
 	})
+	m.mu.Unlock()
 
 	return conf, nil
 }
@@ -272,14 +296,13 @@ func (m *Manager) CreatePlan(
 	m.plans[planID] = plan
 	session := m.getOrCreateSessionLocked(sessionKey)
 	session.ActivePlan = plan
-	m.mu.Unlock()
-
-	// 添加到会话历史
+	// 在锁内添加到会话历史，避免竞态
 	session.AddInteraction(Interaction{
 		Type:      "plan_created",
 		Content:   title,
 		Timestamp: time.Now(),
 	})
+	m.mu.Unlock()
 
 	return plan
 }

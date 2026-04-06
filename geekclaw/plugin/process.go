@@ -89,9 +89,25 @@ func (p *Process) Spawn(ctx context.Context, opts SpawnOpts) (json.RawMessage, e
 
 	args := append([]string{}, p.cfg.Args...)
 	cmd := exec.CommandContext(procCtx, p.cfg.Command, args...)
-	// 构建子进程环境：继承当前环境，用 cfg.Env 覆盖（而非追加）同名变量
+	// 构建子进程环境：继承当前环境，用 cfg.Env 覆盖（而非追加）同名变量。
+	// 过滤危险的环境变量，防止通过配置注入恶意库加载。
+	dangerousEnvVars := map[string]bool{
+		"LD_PRELOAD":             true,
+		"LD_LIBRARY_PATH":        true,
+		"DYLD_INSERT_LIBRARIES":  true,
+		"DYLD_LIBRARY_PATH":      true,
+		"DYLD_FRAMEWORK_PATH":    true,
+	}
 	overrides := make(map[string]string, len(p.cfg.Env))
 	for k, v := range p.cfg.Env {
+		upperK := strings.ToUpper(k)
+		if dangerousEnvVars[upperK] {
+			logger.WarnCF("plugin", "Blocked dangerous environment variable", map[string]any{
+				"plugin":   p.name,
+				"variable": k,
+			})
+			continue
+		}
 		overrides[k] = v
 	}
 	baseEnv := os.Environ()
@@ -190,6 +206,26 @@ func (p *Process) stopLocked() {
 	}
 
 	p.wg.Wait()
+}
+
+// IsAlive 检查插件进程是否仍然存活。
+// 通过检查底层进程的 ProcessState 判断（cmd.Wait 设置该字段）。
+func (p *Process) IsAlive() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.cmd == nil || p.cmd.Process == nil {
+		return false
+	}
+
+	// ProcessState 在 Wait() 完成后才非 nil。
+	// 读取循环的 goroutine 会在进程退出时触发，
+	// 但进程可能在 Wait() 调用前就已退出。
+	// 使用 signal(0) 探测进程是否存在。
+	if p.cmd.ProcessState != nil {
+		return false
+	}
+	return true
 }
 
 // handleNotifications 处理来自插件的通知。
