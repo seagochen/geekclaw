@@ -4,13 +4,27 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
 // FallbackChain 在多个候选者之间协调模型故障转移。
 type FallbackChain struct {
 	cooldown *CooldownTracker
+
+	// 缓存最近成功的候选者，下次优先尝试
+	lastSuccessMu sync.RWMutex
+	lastSuccess   map[string]*lastSuccessEntry // key = 候选列表指纹
 }
+
+// lastSuccessEntry 记录最近成功的候选者及其时间。
+type lastSuccessEntry struct {
+	provider string
+	model    string
+	at       time.Time
+}
+
+const lastSuccessTTL = 5 * time.Minute
 
 // FallbackCandidate 表示一个待尝试的模型/提供者。
 type FallbackCandidate struct {
@@ -38,7 +52,27 @@ type FallbackAttempt struct {
 
 // NewFallbackChain 使用给定的冷却追踪器创建新的故障转移链。
 func NewFallbackChain(cooldown *CooldownTracker) *FallbackChain {
-	return &FallbackChain{cooldown: cooldown}
+	return &FallbackChain{
+		cooldown:    cooldown,
+		lastSuccess: make(map[string]*lastSuccessEntry),
+	}
+}
+
+// candidatesKey 为候选者列表生成缓存键。
+func candidatesKey(candidates []FallbackCandidate) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for i, c := range candidates {
+		if i > 0 {
+			sb.WriteByte('|')
+		}
+		sb.WriteString(c.Provider)
+		sb.WriteByte('/')
+		sb.WriteString(c.Model)
+	}
+	return sb.String()
 }
 
 // ResolveCandidates 将模型配置解析为去重后的候选者列表。
@@ -112,6 +146,33 @@ func (fc *FallbackChain) Execute(
 		Attempts: make([]FallbackAttempt, 0, len(candidates)),
 	}
 
+	// 尝试使用缓存的最近成功候选者，避免每次都从头遍历
+	cacheKey := candidatesKey(candidates)
+	fc.lastSuccessMu.RLock()
+	cached := fc.lastSuccess[cacheKey]
+	fc.lastSuccessMu.RUnlock()
+
+	if cached != nil && time.Since(cached.at) < lastSuccessTTL {
+		if fc.cooldown.IsAvailable(cached.provider) {
+			resp, err := run(ctx, cached.provider, cached.model)
+			if err == nil {
+				fc.cooldown.MarkSuccess(cached.provider)
+				fc.lastSuccessMu.Lock()
+				fc.lastSuccess[cacheKey] = &lastSuccessEntry{
+					provider: cached.provider,
+					model:    cached.model,
+					at:       time.Now(),
+				}
+				fc.lastSuccessMu.Unlock()
+				result.Response = resp
+				result.Provider = cached.provider
+				result.Model = cached.model
+				return result, nil
+			}
+			// 缓存候选失败，继续正常故障转移流程
+		}
+	}
+
 	for i, candidate := range candidates {
 		// 每次尝试前检查上下文。
 		if ctx.Err() == context.Canceled {
@@ -141,8 +202,15 @@ func (fc *FallbackChain) Execute(
 		elapsed := time.Since(start)
 
 		if err == nil {
-			// 成功。
+			// 成功 — 缓存此候选者供下次优先使用。
 			fc.cooldown.MarkSuccess(candidate.Provider)
+			fc.lastSuccessMu.Lock()
+			fc.lastSuccess[cacheKey] = &lastSuccessEntry{
+				provider: candidate.Provider,
+				model:    candidate.Model,
+				at:       time.Now(),
+			}
+			fc.lastSuccessMu.Unlock()
 			result.Response = resp
 			result.Provider = candidate.Provider
 			result.Model = candidate.Model

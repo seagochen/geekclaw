@@ -56,6 +56,10 @@ type JSONLStore struct {
 	dir     string
 	metaDir string
 	locks   [numLockShards]sync.Mutex
+
+	// 元数据内存缓存，避免每次操作都读磁盘
+	metaCacheMu sync.RWMutex
+	metaCache   map[string]sessionMeta
 }
 
 // NewJSONLStore 创建一个新的 JSONL 存储。
@@ -69,7 +73,7 @@ func NewJSONLStore(dir, metaDir string) (*JSONLStore, error) {
 	if err := os.MkdirAll(metaDir, 0o755); err != nil {
 		return nil, fmt.Errorf("memory: create meta directory: %w", err)
 	}
-	return &JSONLStore{dir: dir, metaDir: metaDir}, nil
+	return &JSONLStore{dir: dir, metaDir: metaDir, metaCache: make(map[string]sessionMeta)}, nil
 }
 
 // sessionLock 返回给定会话键的互斥锁。
@@ -101,12 +105,25 @@ func sanitizeKey(key string) string {
 	return s
 }
 
-// readMeta 加载会话的元数据文件。
-// 如果文件不存在，返回零值 sessionMeta。
+// readMeta 加载会话的元数据，优先从内存缓存读取。
+// 如果缓存未命中，从磁盘加载并缓存结果。
 func (s *JSONLStore) readMeta(key string) (sessionMeta, error) {
+	// 先查缓存
+	s.metaCacheMu.RLock()
+	if cached, ok := s.metaCache[key]; ok {
+		s.metaCacheMu.RUnlock()
+		return cached, nil
+	}
+	s.metaCacheMu.RUnlock()
+
+	// 缓存未命中，从磁盘读取
 	data, err := os.ReadFile(s.metaPath(key))
 	if os.IsNotExist(err) {
-		return sessionMeta{Key: key}, nil
+		meta := sessionMeta{Key: key}
+		s.metaCacheMu.Lock()
+		s.metaCache[key] = meta
+		s.metaCacheMu.Unlock()
+		return meta, nil
 	}
 	if err != nil {
 		return sessionMeta{}, fmt.Errorf("memory: read meta: %w", err)
@@ -116,17 +133,31 @@ func (s *JSONLStore) readMeta(key string) (sessionMeta, error) {
 	if err != nil {
 		return sessionMeta{}, fmt.Errorf("memory: decode meta: %w", err)
 	}
+
+	s.metaCacheMu.Lock()
+	s.metaCache[key] = meta
+	s.metaCacheMu.Unlock()
+
 	return meta, nil
 }
 
 // writeMeta 使用项目标准的 WriteFileAtomic（临时文件 + fsync + 重命名）
-// 原子地写入元数据文件。
+// 原子地写入元数据文件，并更新内存缓存。
 func (s *JSONLStore) writeMeta(key string, meta sessionMeta) error {
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return fmt.Errorf("memory: encode meta: %w", err)
 	}
-	return fileutil.WriteFileAtomic(s.metaPath(key), data, 0o644)
+	if err := fileutil.WriteFileAtomic(s.metaPath(key), data, 0o644); err != nil {
+		return err
+	}
+
+	// 写入成功后更新缓存
+	s.metaCacheMu.Lock()
+	s.metaCache[key] = meta
+	s.metaCacheMu.Unlock()
+
+	return nil
 }
 
 // readMessages 从 .jsonl 文件读取有效的 JSON 行，跳过

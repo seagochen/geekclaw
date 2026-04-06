@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/seagosoft/geekclaw/geekclaw/logger"
 	"github.com/seagosoft/geekclaw/geekclaw/providers"
@@ -295,13 +294,23 @@ func (al *AgentLoop) summarizeBatch(
 }
 
 // estimateTokens 估算消息列表中的 token 数量。
-// 使用每个 token 2.5 个字符的安全启发式值，
-// 比之前的 3 字符/token 更好地处理 CJK 及其他额外开销。
+// 对 ASCII/拉丁字符使用 ~4 字符/token，对 CJK 等多字节字符使用 ~1.5 字符/token。
+// 这比统一的 2.5 字符/token 更准确，尤其对中日韩内容。
 func (al *AgentLoop) estimateTokens(messages []providers.Message) int {
-	totalChars := 0
+	totalTokens := 0
 	for _, m := range messages {
-		totalChars += utf8.RuneCountInString(m.Content)
+		var asciiChars, wideChars int
+		for _, r := range m.Content {
+			if r <= 0x7F {
+				asciiChars++
+			} else {
+				wideChars++
+			}
+		}
+		// ASCII: ~4 字符/token; CJK/宽字符: ~1.5 字符/token
+		totalTokens += asciiChars/4 + wideChars*2/3
+		// 每条消息的元数据开销（role, formatting）
+		totalTokens += 4
 	}
-	// 2.5 字符/token = totalChars * 2 / 5
-	return totalChars * 2 / 5
+	return totalTokens
 }

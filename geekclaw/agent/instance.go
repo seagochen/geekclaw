@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/seagosoft/geekclaw/geekclaw/config"
 	"github.com/seagosoft/geekclaw/geekclaw/memory"
@@ -39,6 +40,7 @@ type AgentInstance struct {
 	ContextBuilder            *ContextBuilder
 	Tools                     *tools.ToolRegistry
 	Subagents                 *config.SubagentsConfig
+	SessionTimeout            time.Duration
 	SkillsFilter              []string
 	Candidates                []providers.FallbackCandidate
 
@@ -207,6 +209,11 @@ func NewAgentInstance(
 
 	candidates := providers.ResolveCandidatesWithLookup(modelCfg, defaults.Provider, resolveFromModelList)
 
+	var sessionTimeout time.Duration
+	if defaults.SessionTimeout > 0 {
+		sessionTimeout = time.Duration(defaults.SessionTimeout) * time.Second
+	}
+
 	return &AgentInstance{
 		ID:                        agentID,
 		Name:                      agentName,
@@ -221,6 +228,7 @@ func NewAgentInstance(
 		ContextWindow:             maxTokens,
 		SummarizeMessageThreshold: summarizeMessageThreshold,
 		SummarizeTokenPercent:     summarizeTokenPercent,
+		SessionTimeout:            sessionTimeout,
 		Provider:                  provider,
 		Sessions:                  sessions,
 		ContextBuilder:            contextBuilder,

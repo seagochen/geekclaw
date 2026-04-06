@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -91,39 +92,84 @@ func NewAgentLoop(
 ) *AgentLoop {
 	registry := NewAgentRegistry(cfg, provider)
 
-	// 从配置加载外部搜索插件（使用第一个成功启动的插件）
-	var searchPlugins []*searchext.ExternalSearchProvider
-	var activeSearchPlugin *searchext.ExternalSearchProvider
+	// 并行启动外部插件（搜索、工具），减少启动时间
+	var (
+		searchPlugins       []*searchext.ExternalSearchProvider
+		activeSearchPlugin  *searchext.ExternalSearchProvider
+		toolPlugins         []*searchext.ExternalToolPlugin
+		pluginMu            sync.Mutex
+		pluginWg            sync.WaitGroup
+	)
+
+	// 并行启动搜索插件
 	for name, pluginCfg := range cfg.Tools.Web.Plugins {
 		if !pluginCfg.Enabled {
 			continue
 		}
-		plugin := searchext.NewExternalSearchProvider(name, searchext.PluginConfig{
-			Enabled: pluginCfg.Enabled,
-			Command: pluginCfg.Command,
-			Args:    pluginCfg.Args,
-			Env:     pluginCfg.Env,
-			Config:  pluginCfg.Config,
-		})
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := plugin.Start(ctx); err != nil {
-			logger.WarnCF("search", "Failed to start search plugin", map[string]any{
-				"plugin": name,
-				"error":  err.Error(),
+		pluginWg.Add(1)
+		go func(name string, pluginCfg config.WebSearchPluginConfig) {
+			defer pluginWg.Done()
+			plugin := searchext.NewExternalSearchProvider(name, searchext.PluginConfig{
+				Enabled: pluginCfg.Enabled,
+				Command: pluginCfg.Command,
+				Args:    pluginCfg.Args,
+				Env:     pluginCfg.Env,
+				Config:  pluginCfg.Config,
 			})
-			cancel()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := plugin.Start(ctx); err != nil {
+				logger.WarnCF("search", "Failed to start search plugin", map[string]any{
+					"plugin": name,
+					"error":  err.Error(),
+				})
+				return
+			}
+			pluginMu.Lock()
+			searchPlugins = append(searchPlugins, plugin)
+			if activeSearchPlugin == nil {
+				activeSearchPlugin = plugin
+				logger.InfoCF("search", "Using external search plugin", map[string]any{
+					"plugin":   name,
+					"provider": plugin.Name(),
+				})
+			}
+			pluginMu.Unlock()
+		}(name, pluginCfg)
+	}
+
+	// 并行启动工具插件
+	for name, pluginCfg := range cfg.Tools.Plugins {
+		if !pluginCfg.Enabled {
 			continue
 		}
-		cancel()
-		searchPlugins = append(searchPlugins, plugin)
-		if activeSearchPlugin == nil {
-			activeSearchPlugin = plugin
-			logger.InfoCF("search", "Using external search plugin", map[string]any{
-				"plugin":   name,
-				"provider": plugin.Name(),
+		pluginWg.Add(1)
+		go func(name string, pluginCfg config.ToolPluginConfig) {
+			defer pluginWg.Done()
+			plugin := searchext.NewExternalToolPlugin(name, searchext.PluginConfig{
+				Enabled: pluginCfg.Enabled,
+				Command: pluginCfg.Command,
+				Args:    pluginCfg.Args,
+				Env:     pluginCfg.Env,
+				Config:  pluginCfg.Config,
 			})
-		}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := plugin.Start(ctx); err != nil {
+				logger.WarnCF("tools", "Failed to start tool plugin", map[string]any{
+					"plugin": name,
+					"error":  err.Error(),
+				})
+				return
+			}
+			pluginMu.Lock()
+			toolPlugins = append(toolPlugins, plugin)
+			pluginMu.Unlock()
+		}(name, pluginCfg)
 	}
+
+	// 等待所有插件启动完成
+	pluginWg.Wait()
 
 	// 查找活跃搜索插件的 max_results
 	var searchPluginMaxResults int
@@ -134,32 +180,6 @@ func NewAgentLoop(
 				break
 			}
 		}
-	}
-
-	// 从配置加载外部工具插件
-	var toolPlugins []*searchext.ExternalToolPlugin
-	for name, pluginCfg := range cfg.Tools.Plugins {
-		if !pluginCfg.Enabled {
-			continue
-		}
-		plugin := searchext.NewExternalToolPlugin(name, searchext.PluginConfig{
-			Enabled: pluginCfg.Enabled,
-			Command: pluginCfg.Command,
-			Args:    pluginCfg.Args,
-			Env:     pluginCfg.Env,
-			Config:  pluginCfg.Config,
-		})
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := plugin.Start(ctx); err != nil {
-			logger.WarnCF("tools", "Failed to start tool plugin", map[string]any{
-				"plugin": name,
-				"error":  err.Error(),
-			})
-			cancel()
-			continue
-		}
-		cancel()
-		toolPlugins = append(toolPlugins, plugin)
 	}
 
 	// 向所有代理注册共享工具
@@ -174,34 +194,54 @@ func NewAgentLoop(
 
 	cmdReg := commands.NewRegistry(commands.BuiltinDefinitions())
 
-	// 从配置加载外部命令插件
+	// 并行启动外部命令插件
 	var cmdPlugins []*cmdext.ExternalCommandPlugin
+	var cmdPluginsMu sync.Mutex
+	var cmdWg sync.WaitGroup
+	type cmdPluginResult struct {
+		plugin *cmdext.ExternalCommandPlugin
+		name   string
+	}
+	var cmdResults []cmdPluginResult
+
 	for name, pluginCfg := range cfg.Commands.Plugins {
 		if !pluginCfg.Enabled {
 			continue
 		}
-		plugin := cmdext.NewExternalCommandPlugin(name, cmdext.PluginConfig{
-			Enabled: pluginCfg.Enabled,
-			Command: pluginCfg.Command,
-			Args:    pluginCfg.Args,
-			Env:     pluginCfg.Env,
-			Config:  pluginCfg.Config,
-		})
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := plugin.Start(ctx); err != nil {
-			logger.WarnCF("commands", "Failed to start command plugin", map[string]any{
-				"plugin": name,
-				"error":  err.Error(),
+		cmdWg.Add(1)
+		go func(name string, pluginCfg config.CommandPluginConfig) {
+			defer cmdWg.Done()
+			plugin := cmdext.NewExternalCommandPlugin(name, cmdext.PluginConfig{
+				Enabled: pluginCfg.Enabled,
+				Command: pluginCfg.Command,
+				Args:    pluginCfg.Args,
+				Env:     pluginCfg.Env,
+				Config:  pluginCfg.Config,
 			})
-			cancel()
-			continue
-		}
-		cancel()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := plugin.Start(ctx); err != nil {
+				logger.WarnCF("commands", "Failed to start command plugin", map[string]any{
+					"plugin": name,
+					"error":  err.Error(),
+				})
+				return
+			}
+			cmdPluginsMu.Lock()
+			cmdResults = append(cmdResults, cmdPluginResult{plugin: plugin, name: name})
+			cmdPluginsMu.Unlock()
+		}(name, pluginCfg)
+	}
+	cmdWg.Wait()
+
+	// 按顺序注册命令（避免并发写 cmdReg）
+	for _, r := range cmdResults {
+		plugin := r.plugin
 
 		if conflicts := cmdReg.MergeDefinitions(plugin.Commands()); len(conflicts) > 0 {
 			for _, c := range conflicts {
 				logger.WarnCF("commands", "Plugin command conflict", map[string]any{
-					"plugin": name,
+					"plugin": r.name,
 					"error":  c.Error(),
 				})
 			}
@@ -416,9 +456,68 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 		}
 	}
 
+	// 使用按会话分发的并发处理：不同会话并行，同一会话串行。
+	type sessionWorker struct {
+		ch   chan bus.InboundMessage
+		done chan struct{}
+	}
+	var (
+		workersMu sync.Mutex
+		workers   = make(map[string]*sessionWorker)
+	)
+
+	processMsg := func(msg bus.InboundMessage) {
+		defer func() {
+			if al.mediaStore != nil && msg.MediaScope != "" {
+				if releaseErr := al.mediaStore.ReleaseAll(msg.MediaScope); releaseErr != nil {
+					logger.WarnCF("agent", "Failed to release media", map[string]any{
+						"scope": msg.MediaScope,
+						"error": releaseErr.Error(),
+					})
+				}
+			}
+		}()
+
+		response, err := al.processMessage(ctx, msg)
+		if err != nil {
+			response = fmt.Sprintf("Error processing message: %v", err)
+		}
+
+		if response != "" {
+			al.bus.PublishOutbound(ctx, bus.OutboundMessage{
+				Channel: msg.Channel,
+				ChatID:  msg.ChatID,
+				Content: response,
+			})
+			logger.InfoCF("agent", "Published outbound response",
+				map[string]any{
+					"channel":     msg.Channel,
+					"chat_id":     msg.ChatID,
+					"content_len": len(response),
+				})
+		}
+	}
+
+	// 获取消息的会话键：优先使用 SessionKey，否则用 channel:chatID
+	sessionKeyFor := func(msg bus.InboundMessage) string {
+		if msg.SessionKey != "" {
+			return msg.SessionKey
+		}
+		return msg.Channel + ":" + msg.ChatID
+	}
+
 	for al.running.Load() {
 		select {
 		case <-ctx.Done():
+			// 等待所有 worker 完成
+			workersMu.Lock()
+			for _, w := range workers {
+				close(w.ch)
+			}
+			for _, w := range workers {
+				<-w.done
+			}
+			workersMu.Unlock()
 			return nil
 		default:
 			msg, ok := al.bus.ConsumeInbound(ctx)
@@ -426,40 +525,47 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				continue
 			}
 
-			// 处理消息
-			func() {
-				defer func() {
-					if al.mediaStore != nil && msg.MediaScope != "" {
-						if releaseErr := al.mediaStore.ReleaseAll(msg.MediaScope); releaseErr != nil {
-							logger.WarnCF("agent", "Failed to release media", map[string]any{
-								"scope": msg.MediaScope,
-								"error": releaseErr.Error(),
-							})
-						}
+			key := sessionKeyFor(msg)
+
+			workersMu.Lock()
+			w, exists := workers[key]
+			if !exists {
+				w = &sessionWorker{
+					ch:   make(chan bus.InboundMessage, 16),
+					done: make(chan struct{}),
+				}
+				workers[key] = w
+				go func(key string, w *sessionWorker) {
+					defer close(w.done)
+					for m := range w.ch {
+						processMsg(m)
 					}
-				}()
+					// worker 空闲后自行清理
+					workersMu.Lock()
+					delete(workers, key)
+					workersMu.Unlock()
+				}(key, w)
+			}
+			workersMu.Unlock()
 
-				response, err := al.processMessage(ctx, msg)
-				if err != nil {
-					response = fmt.Sprintf("Error processing message: %v", err)
-				}
-
-				if response != "" {
-					al.bus.PublishOutbound(ctx, bus.OutboundMessage{
-						Channel: msg.Channel,
-						ChatID:  msg.ChatID,
-						Content: response,
-					})
-						logger.InfoCF("agent", "Published outbound response",
-							map[string]any{
-								"channel":     msg.Channel,
-								"chat_id":     msg.ChatID,
-								"content_len": len(response),
-							})
-				}
-			}()
+			// 非阻塞发送，如果 worker 队列满则直接处理
+			select {
+			case w.ch <- msg:
+			default:
+				go processMsg(msg)
+			}
 		}
 	}
+
+	// 停止时清理所有 worker
+	workersMu.Lock()
+	for _, w := range workers {
+		close(w.ch)
+	}
+	for _, w := range workers {
+		<-w.done
+	}
+	workersMu.Unlock()
 
 	return nil
 }
@@ -894,6 +1000,13 @@ func (al *AgentLoop) runAgentLoop(
 	agent *AgentInstance,
 	opts processOptions,
 ) (string, error) {
+	// 0a. 如果配置了会话超时，限制整体执行时间
+	if agent.SessionTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, agent.SessionTimeout)
+		defer cancel()
+	}
+
 	// 0. 记录最后活跃频道用于心跳通知（跳过内部频道和 cli）
 	if opts.Channel != "" && opts.ChatID != "" {
 		if !channels.IsInternalChannel(opts.Channel) {

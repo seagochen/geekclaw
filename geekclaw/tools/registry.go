@@ -24,6 +24,10 @@ type ToolRegistry struct {
 	tools   map[string]*ToolEntry
 	mu      sync.RWMutex
 	version atomic.Uint64 // 在 Register/RegisterHidden 时递增，用于缓存失效
+
+	// 排序名称缓存，避免每次调用都重新排序
+	sortedNamesCached   []string
+	sortedNamesVersion  uint64
 }
 
 // NewToolRegistry 创建一个新的工具注册表。
@@ -231,15 +235,22 @@ func (r *ToolRegistry) ExecuteWithContext(
 }
 
 // sortedToolNames 返回按排序顺序的工具名称，用于确定性迭代。
-// 这对 KV 缓存稳定性至关重要：非确定性的 map 迭代会在每次调用时
-// 产生不同的系统提示和工具定义，即使没有工具更改也会使
-// LLM 的前缀缓存失效。
+// 使用缓存避免重复排序 — 仅在工具注册/注销导致 version 变化时重建。
+// 调用者必须持有 r.mu（RLock 或 Lock）。
 func (r *ToolRegistry) sortedToolNames() []string {
+	v := r.version.Load()
+	if r.sortedNamesCached != nil && r.sortedNamesVersion == v {
+		return r.sortedNamesCached
+	}
+
 	names := make([]string, 0, len(r.tools))
 	for name := range r.tools {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+
+	r.sortedNamesCached = names
+	r.sortedNamesVersion = v
 	return names
 }
 

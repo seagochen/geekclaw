@@ -73,7 +73,9 @@ type CronService struct {
 	mu        sync.RWMutex
 	running   bool
 	stopChan  chan struct{}
+	wakeChan  chan struct{} // 用于通知调度循环重新计算唤醒时间
 	gronx     *gronx.Gronx
+	dirty     bool         // 标记是否有未持久化的状态变更
 }
 
 // NewCronService 创建一个新的定时任务服务实例。
@@ -107,6 +109,7 @@ func (cs *CronService) Start() error {
 	}
 
 	cs.stopChan = make(chan struct{})
+	cs.wakeChan = make(chan struct{}, 1)
 	cs.running = true
 	go cs.runLoop(cs.stopChan)
 
@@ -130,16 +133,46 @@ func (cs *CronService) Stop() {
 }
 
 // runLoop 运行定时任务的主循环。
+// 使用动态定时器代替固定 1 秒轮询，根据下一个任务的执行时间精确唤醒。
 func (cs *CronService) runLoop(stopChan chan struct{}) {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
+	const maxSleep = 60 * time.Second // 最长睡眠时间，保底轮询
+
+	timer := time.NewTimer(0) // 立即执行第一次检查
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-stopChan:
 			return
-		case <-ticker.C:
+		case <-cs.wakeChan:
+			// 新任务添加/修改，重新计算唤醒时间
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(0)
+		case <-timer.C:
 			cs.checkJobs()
+
+			// 根据下一个任务的执行时间计算睡眠时长
+			cs.mu.RLock()
+			nextWake := cs.getNextWakeMS()
+			cs.mu.RUnlock()
+
+			sleepDur := maxSleep
+			if nextWake != nil {
+				until := time.Until(time.UnixMilli(*nextWake))
+				if until < sleepDur {
+					if until < 100*time.Millisecond {
+						sleepDur = 100 * time.Millisecond
+					} else {
+						sleepDur = until
+					}
+				}
+			}
+			timer.Reset(sleepDur)
 		}
 	}
 }
@@ -184,6 +217,18 @@ func (cs *CronService) checkJobs() {
 	// 在锁外执行任务。
 	for _, jobID := range dueJobIDs {
 		cs.executeJobByID(jobID)
+	}
+
+	// 批量持久化所有任务状态变更
+	if len(dueJobIDs) > 0 {
+		cs.mu.Lock()
+		if cs.dirty {
+			if err := cs.saveStoreUnsafe(); err != nil {
+				log.Printf("[cron] failed to save store after batch execution: %v", err)
+			}
+			cs.dirty = false
+		}
+		cs.mu.Unlock()
 	}
 }
 
@@ -272,9 +317,8 @@ func (cs *CronService) executeJobByID(jobID string) {
 		log.Printf("[cron] ✓ job '%s' completed in %dms, next run: %s", job.Name, execDuration, nextRunStr)
 	}
 
-	if err := cs.saveStoreUnsafe(); err != nil {
-		log.Printf("[cron] failed to save store: %v", err)
-	}
+	// 标记为脏数据，由调度循环统一持久化（避免每个 job 单独写盘）
+	cs.dirty = true
 }
 
 // computeNextRun 根据调度配置计算下次执行时间。
@@ -343,6 +387,14 @@ func (cs *CronService) Load() error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	return cs.loadStore()
+}
+
+// notifyWake 非阻塞地通知调度循环重新计算唤醒时间。
+func (cs *CronService) notifyWake() {
+	select {
+	case cs.wakeChan <- struct{}{}:
+	default:
+	}
 }
 
 // SetOnJob 设置任务执行时的回调处理函数。
@@ -422,6 +474,11 @@ func (cs *CronService) AddJob(
 		return nil, err
 	}
 
+	// 通知调度循环重新计算唤醒时间
+	if cs.wakeChan != nil {
+		cs.notifyWake()
+	}
+
 	return &job, nil
 }
 
@@ -488,6 +545,10 @@ func (cs *CronService) EnableJob(jobID string, enabled bool) *CronJob {
 
 			if err := cs.saveStoreUnsafe(); err != nil {
 				log.Printf("[cron] failed to save store after enable: %v", err)
+			}
+			// 启用任务时通知调度循环重新计算唤醒时间
+			if enabled && cs.wakeChan != nil {
+				cs.notifyWake()
 			}
 			return job
 		}

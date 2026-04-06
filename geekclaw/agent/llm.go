@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -173,7 +174,7 @@ func (al *AgentLoop) runLLMIteration(
 			return agent.Provider.Chat(ctx, messages, providerToolDefs, activeModel, llmOpts)
 		}
 
-		// 上下文/token 错误的重试循环
+		// 上下文/token 错误的重试循环（使用 providers.ClassifyError 进行结构化错误分类）
 		maxRetries := 2
 		for retry := 0; retry <= maxRetries; retry++ {
 			response, err = callLLM()
@@ -181,16 +182,19 @@ func (al *AgentLoop) runLLMIteration(
 				break
 			}
 
-			errMsg := strings.ToLower(err.Error())
+			// 使用结构化错误分类代替字符串匹配
+			classified := providers.ClassifyError(err, "", activeModel)
 
-			// 检查是否为网络/HTTP 超时 — 而非上下文窗口错误。
+			// 上下文取消：立即终止
+			if errors.Is(err, context.Canceled) {
+				break
+			}
+
 			isTimeoutError := errors.Is(err, context.DeadlineExceeded) ||
-				strings.Contains(errMsg, "deadline exceeded") ||
-				strings.Contains(errMsg, "client.timeout") ||
-				strings.Contains(errMsg, "timed out") ||
-				strings.Contains(errMsg, "timeout exceeded")
+				(classified != nil && classified.Reason == providers.FailoverTimeout)
 
-			// 检测真正的上下文窗口/token 限制错误，排除网络超时。
+			// 检测上下文窗口/token 限制错误
+			errMsg := strings.ToLower(err.Error())
 			isContextError := !isTimeoutError && (strings.Contains(errMsg, "context_length_exceeded") ||
 				strings.Contains(errMsg, "context window") ||
 				strings.Contains(errMsg, "maximum context length") ||
@@ -202,11 +206,12 @@ func (al *AgentLoop) runLLMIteration(
 				strings.Contains(errMsg, "request too large"))
 
 			if isTimeoutError && retry < maxRetries {
-				backoff := time.Duration(retry+1) * 5 * time.Second
+				backoff := time.Duration(1<<uint(retry)) * 5 * time.Second // 指数退避：5s, 10s
 				logger.WarnCF("agent", "Timeout error, retrying after backoff", map[string]any{
 					"error":   err.Error(),
 					"retry":   retry,
 					"backoff": backoff.String(),
+					"reason":  string(classified.Reason),
 				})
 				time.Sleep(backoff)
 				continue
@@ -338,7 +343,9 @@ func (al *AgentLoop) runLLMIteration(
 		// 将包含工具调用的助手消息保存到会话
 		agent.Sessions.AddFullMessage(opts.SessionKey, assistantMsg)
 
-		// 并行执行工具调用
+		// 并行执行工具调用（使用信号量限制并发数，带 panic 恢复）
+		const maxConcurrentTools = 10
+
 		type indexedAgentResult struct {
 			result *tools.ToolResult
 			tc     providers.ToolCall
@@ -346,6 +353,7 @@ func (al *AgentLoop) runLLMIteration(
 
 		agentResults := make([]indexedAgentResult, len(normalizedToolCalls))
 		var wg sync.WaitGroup
+		sem := make(chan struct{}, maxConcurrentTools)
 
 		for i, tc := range normalizedToolCalls {
 			agentResults[i].tc = tc
@@ -353,6 +361,25 @@ func (al *AgentLoop) runLLMIteration(
 			wg.Add(1)
 			go func(idx int, tc providers.ToolCall) {
 				defer wg.Done()
+				sem <- struct{}{}        // 获取信号量
+				defer func() { <-sem }() // 释放信号量
+
+				// panic 恢复：防止单个工具 panic 导致整个代理崩溃
+				defer func() {
+					if r := recover(); r != nil {
+						stack := make([]byte, 4096)
+						n := runtime.Stack(stack, false)
+						logger.ErrorCF("agent", "Tool execution panicked",
+							map[string]any{
+								"tool":  tc.Name,
+								"panic": fmt.Sprintf("%v", r),
+								"stack": string(stack[:n]),
+							})
+						agentResults[idx].result = tools.ErrorResult(
+							fmt.Sprintf("tool %q panicked: %v", tc.Name, r),
+						)
+					}
+				}()
 
 				argsJSON, _ := json.Marshal(tc.Arguments)
 				argsPreview := utils.Truncate(string(argsJSON), 200)

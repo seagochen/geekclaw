@@ -174,6 +174,7 @@ type AgentDefaults struct {
 	SummarizeMessageThreshold int            `json:"summarize_message_threshold" yaml:"summarize_message_threshold"     env:"GEEKCLAW_AGENTS_DEFAULTS_SUMMARIZE_MESSAGE_THRESHOLD"`
 	SummarizeTokenPercent     int            `json:"summarize_token_percent" yaml:"summarize_token_percent"         env:"GEEKCLAW_AGENTS_DEFAULTS_SUMMARIZE_TOKEN_PERCENT"`
 	MaxMediaSize              int            `json:"max_media_size,omitempty" yaml:"max_media_size,omitempty"        env:"GEEKCLAW_AGENTS_DEFAULTS_MAX_MEDIA_SIZE"`
+	SessionTimeout            int            `json:"session_timeout,omitempty" yaml:"session_timeout,omitempty"      env:"GEEKCLAW_AGENTS_DEFAULTS_SESSION_TIMEOUT"` // 单次会话超时（秒），0 表示不限制
 }
 
 // UnmarshalYAML 实现 AgentDefaults 的自定义 YAML 反序列化。
