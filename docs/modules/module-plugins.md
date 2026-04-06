@@ -155,7 +155,26 @@ plugins/skills/
 
 ### 插件进程隔离
 
-每个插件运行在独立的子进程中，崩溃不影响主进程。`pkg/plugin.PluginProcess` 封装了 `exec.Cmd` 的启动、stdin/stdout 连接、JSON-RPC 协议帧解析，以及进程退出检测。
+每个插件运行在独立的子进程中，崩溃不影响主进程。`pkg/plugin.Process` 封装了 `exec.Cmd` 的启动、stdin/stdout 连接、JSON-RPC 协议帧解析，以及进程退出检测。
+
+### 进程存活检测
+
+`Process.IsAlive()` 方法通过检查 `cmd.ProcessState` 判断插件进程是否仍在运行。如果进程已退出（`ProcessState != nil`），返回 `false`。
+
+### 环境变量安全过滤
+
+插件启动时，`Process.Spawn()` 会**过滤危险的环境变量**，防止通过配置注入恶意库：
+
+- `LD_PRELOAD` — Linux 动态库注入
+- `LD_LIBRARY_PATH` — Linux 库路径覆盖
+- `DYLD_INSERT_LIBRARIES` — macOS 动态库注入
+- `DYLD_LIBRARY_PATH` / `DYLD_FRAMEWORK_PATH` — macOS 路径覆盖
+
+被过滤的变量会记录 warn 日志。
+
+### 并行启动
+
+所有外部插件（搜索、工具、命令）在 `NewAgentLoop` 中**并行启动**，每个插件独立超时（10 秒），失败不影响其他插件。
 
 ### 工作目录约束
 

@@ -21,8 +21,14 @@ flowchart TD
     SetupHTTP --> StartAll[channelManager.StartAll\n启动所有渠道 goroutine]
     StartAll --> StartLoop[go agentLoop.Run\n启动 Agent 消息循环]
     StartLoop --> WaitSig{等待 SIGINT}
-    WaitSig -->|收到信号| Shutdown[优雅关闭\nStopAll + 保存会话]
-    Shutdown --> End([退出])
+    WaitSig -->|收到信号| Shutdown[优雅关闭]
+    Shutdown --> StopCh[1. cancel context]
+    StopCh --> StopChannels[2. channelManager.StopAll\n停止消息源]
+    StopChannels --> StopAgent[3. agentLoop.Stop\n停止消费者]
+    StopAgent --> StopCron[4. cronService.Stop\n停止定时任务]
+    StopCron --> CloseBus[5. msgBus.Close\n最后关闭总线]
+    CloseBus --> Cleanup[6. 清理 Provider/Voice/Media]
+    Cleanup --> End([退出])
 ```
 
 ---

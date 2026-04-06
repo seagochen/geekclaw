@@ -165,11 +165,23 @@ flowchart TD
 
 ### 并行工具执行
 
-所有 ToolCall 通过 `sync.WaitGroup` 并发执行，结果按原始顺序收集，确保 `role:tool` 消息与 `ToolCallID` 正确对应。每次工具迭代后调用 `Tools.TickTTL()`，使 MCP 发现工具在限定轮数后自动隐藏。
+所有 ToolCall 通过 `sync.WaitGroup` 并发执行（**上限 10 并发，使用 channel 信号量限制**），结果按原始顺序收集，确保 `role:tool` 消息与 `ToolCallID` 正确对应。每个 goroutine 都有 **panic recovery**，防止单个工具崩溃导致整个 Agent 挂掉。每次工具迭代后调用 `Tools.TickTTL()`，使 MCP 发现工具在限定轮数后自动隐藏。
+
+### 并发消息处理
+
+`AgentLoop.Run()` 使用**按 session key 分发的并发模型**：不同会话并行处理，同一会话串行保证顺序。每个 session 拥有独立的 worker goroutine 和消息队列（容量 16）。Worker 在空闲 **10 分钟**后自动回收，防止长期运行产生内存泄漏。
+
+### 会话超时
+
+通过 `config.yaml` 中的 `session_timeout`（秒）配置单次会话的最大执行时间。超时后 context 自动取消，防止工具卡死导致会话无限挂起。
 
 ### 会话摘要压缩
 
-当消息数超过 `SummarizeMessageThreshold` 时，异步启动摘要流程：用 LLM 将历史压缩为摘要，然后调用 `TruncateHistory(4)` 只保留最近 4 条消息，摘要注入系统提示词的动态上下文部分。
+当消息数超过 `SummarizeMessageThreshold` 时，异步启动摘要流程：用 LLM 将历史压缩为摘要，然后调用 `TruncateHistory(4)` 只保留最近 4 条消息，摘要注入系统提示词的动态上下文部分。Token 估算**区分 ASCII 和 CJK 字符**（ASCII ~4 字符/token，CJK ~1.5 字符/token），对中日韩内容更准确。
+
+### LLM 错误处理
+
+重试循环使用 `providers.ClassifyError` 进行**结构化错误分类**（而非字符串匹配），超时重试采用**指数退避**（5s → 10s）。上下文窗口溢出时自动执行 `forceCompression` 压缩历史并重试。
 
 ### processOptions 中的 WorkingDir
 

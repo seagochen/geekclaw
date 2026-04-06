@@ -17,6 +17,9 @@
 | 插件管理 | `pkg/plugin` | 外部插件子进程生命周期（启动/通信/关闭）| `PluginProcess` |
 | 心跳服务 | `pkg/heartbeat` | 定期读取 HEARTBEAT.md 触发 Agent | `HeartbeatService` |
 | 设备监听 | `pkg/devices` | USB 等设备事件监听并推送消息 | `Service`, `EventSource` |
+| 定时任务 | `pkg/cron` | 定时/周期任务调度与执行，支持动态唤醒 | `CronService`, `CronJob`, `CronSchedule` |
+| 交互管理 | `pkg/interactive` | 确认请求、执行计划的会话状态管理 | `Manager`, `ConfirmationRequest`, `ExecutionPlan` |
+| 任务队列 | `pkg/tasks` | 活跃 AI 任务管理，支持取消操作 | `Queue`, `Task` |
 | 认证系统 | `pkg/auth` | OAuth Token 存储与刷新 | `TokenStore` |
 | 基础设施 | `pkg/{bus,logger,fileutil,state,health}` | 日志、状态持久化、健康检查 | — |
 
@@ -70,6 +73,9 @@ flowchart TD
         HB[HeartbeatService\n心跳]
         DEV[devices.Service\n设备监听]
         PLUGIN[pkg/plugin\n插件进程管理]
+        CRON[CronService\n定时任务]
+        TASKS[TaskQueue\n任务队列]
+        INTER[InteractiveManager\n交互管理]
     end
 
     Main --> GW
@@ -118,6 +124,9 @@ flowchart TD
 
     HB --> BUS
     DEV --> BUS
+    CRON --> BUS
+    AL --> TASKS
+    AL --> INTER
 ```
 
 ---
@@ -196,6 +205,7 @@ classDiagram
         }
         class FallbackChain {
             -tracker CooldownTracker
+            -lastSuccess map~string~lastSuccessEntry
             +Execute(ctx, candidates, runFn) FallbackResult
         }
         class CooldownTracker {
