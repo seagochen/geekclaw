@@ -389,6 +389,7 @@ dependencies = [
  "geekclaw-tools",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -488,6 +489,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
+ "geekclaw-cron",
  "geekclaw-providers",
  "regex",
  "serde",
@@ -496,6 +499,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

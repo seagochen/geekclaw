@@ -1,0 +1,51 @@
+# GeekClaw Configuration
+# ---------------------------------------------------------------------------
+# Copy this file to config.yaml and fill in your settings.
+# Environment variables with GEEKCLAW_ prefix override these values.
+# ---------------------------------------------------------------------------
+
+agents:
+  defaults:
+    # 默认 LLM 模型（格式: provider/model 或 model）
+    model: gpt-4o
+    # 最大工具迭代次数
+    max_tool_iterations: 10
+    # 单次会话超时（秒）
+    session_timeout: 300
+    # 最大上下文 token 数
+    max_context_tokens: 128000
+    # 系统提示词（留空使用默认）
+    system_prompt: ""
+
+# ---------------------------------------------------------------------------
+# LLM Providers — 至少配置一个
+# ---------------------------------------------------------------------------
+# 支持所有 OpenAI Chat Completions API 兼容端点：
+#   OpenAI, DeepSeek, Groq, Ollama, Anthropic (via proxy), 等
+#
+# API key 支持环境变量引用: $OPENAI_API_KEY
+# ---------------------------------------------------------------------------
+providers:
+  # - name: openai
+  #   base_url: https://api.openai.com/v1
+  #   api_key: $OPENAI_API_KEY
+  #   model: gpt-4o
+  #   fallback_models:
+  #     - gpt-4o-mini
+
+  # - name: deepseek
+  #   base_url: https://api.deepseek.com/v1
+  #   api_key: $DEEPSEEK_API_KEY
+  #   model: deepseek-chat
+
+  # - name: ollama
+  #   base_url: http://localhost:11434/v1
+  #   api_key: ollama
+  #   model: llama3
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+tools:
+  cron:
+    exec_timeout_minutes: 5

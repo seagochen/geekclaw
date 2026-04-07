@@ -133,6 +133,7 @@ pub trait SessionStore: Send + Sync {
 
 ## 文档
 
-- [迁移计划](TASKS.md)
-- [非核心模块记录](DEFERRED.md)
 - [架构总览](docs/architecture.md)
+- [数据流](docs/data-flow.md)
+- [JSON-RPC 插件协议](docs/json-rpc-protocol.md)
+- [非核心模块记录](DEFERRED.md)

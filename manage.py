@@ -1,29 +1,23 @@
 #!/usr/bin/env python3
 """
 geekclaw 构建脚本 (开发用)
-发布构建请使用: goreleaser release
 
 用法:
     ./manage.py <命令> [选项]
 
 命令:
-    build                    生成并编译，然后准备 geekclaw-app/ 运行环境
-    install                  安装到 $GEEKCLAW_HOME（系统级部署）
-    install --user           创建专用 Linux 用户 geekclaw 并安装
-    uninstall                删除 $GEEKCLAW_HOME
-    uninstall --user         删除专用 Linux 用户及主目录
-    clean                    删除构建产物和 geekclaw-app/
+    build                    使用 cargo 编译 release 二进制
+    clean                    删除构建产物
+    test                     运行所有测试
+    bench                    运行性能基准测试
 """
 
 import argparse
 import os
-import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 
 # ---------------------------------------------------------------------------
@@ -48,205 +42,96 @@ def error(msg):   print(f"{Colors.RED}[ERROR]{Colors.NC} {msg}", file=sys.stderr
 def section(msg): print(f"\n{Colors.BLUE}===== {msg} ====={Colors.NC}")
 
 
-# ---------------------------------------------------------------------------
-# 工具函数
-# ---------------------------------------------------------------------------
-
-def run(cmd: list, env: Optional[dict] = None, check: bool = True) -> subprocess.CompletedProcess:
-    merged_env = {**os.environ, **(env or {})}
-    return subprocess.run(cmd, env=merged_env, check=check)
-
-
-def capture(cmd: list, default: str = "") -> str:
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return result.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return default
+def run(cmd: list, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, check=check)
 
 
 # ---------------------------------------------------------------------------
-# 构建逻辑
+# 命令
 # ---------------------------------------------------------------------------
 
-BINARY_NAME = "geekclaw-cli"
-BUILD_DIR   = "build"
-CMD_DIR     = "geekclaw"       # Go 源码目录
-APP_DIR     = "geekclaw-app"   # 本地运行环境目录
-CONFIG_PKG  = "github.com/seagosoft/geekclaw/geekclaw/config"
+BINARY_NAME = "geekclaw"
 
 
 class GeekclawBuilder:
 
     def __init__(self, project_root: Path):
         self.project_root = project_root
-        self.build_dir    = project_root / BUILD_DIR
-        self.binary       = self.build_dir / BINARY_NAME
-        self.app_dir      = project_root / APP_DIR
-
-    # ------------------------------------------------------------------ #
-    # 版本信息
-    # ------------------------------------------------------------------ #
-
-    def _version_info(self) -> dict:
-        version    = capture(["git", "describe", "--tags", "--always", "--dirty"], default="dev")
-        git_commit = capture(["git", "rev-parse", "--short=8", "HEAD"], default="dev")
-        build_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S%z")
-        go_version = capture(["go", "version"], default="")
-        go_ver = go_version.split()[2] if len(go_version.split()) >= 3 else "unknown"
-        return {
-            "version":    version,
-            "git_commit": git_commit,
-            "build_time": build_time,
-            "go_version": go_ver,
-        }
-
-    def _ldflags(self, v: dict) -> str:
-        flags = [
-            f"-X {CONFIG_PKG}.Version={v['version']}",
-            f"-X {CONFIG_PKG}.GitCommit={v['git_commit']}",
-            f"-X {CONFIG_PKG}.BuildTime={v['build_time']}",
-            f"-X {CONFIG_PKG}.GoVersion={v['go_version']}",
-            "-s", "-w",
-        ]
-        return " ".join(flags)
-
-    # ------------------------------------------------------------------ #
-    # build
-    # ------------------------------------------------------------------ #
+        self.target_dir = project_root / "target"
+        self.release_binary = self.target_dir / "release" / BINARY_NAME
 
     def cmd_build(self):
-        section("生成")
-        run(["go", "generate", "./..."])
-        info("go generate 完成")
-
-        section("编译")
-        v = self._version_info()
-        info(f"版本:     {v['version']}")
-        info(f"提交:     {v['git_commit']}")
-        info(f"构建时间: {v['build_time']}")
-        info(f"Go 版本:  {v['go_version']}")
-        info(f"目标:     {self.build_dir / BINARY_NAME}")
-        print()
-
-        self.build_dir.mkdir(parents=True, exist_ok=True)
-        run(
-            ["go", "build", "-tags", "stdjson",
-             "-ldflags", self._ldflags(v),
-             "-o", str(self.binary),
-             f"./{CMD_DIR}"],
-            env={"CGO_ENABLED": "0"},
-        )
-        size_kb = self.binary.stat().st_size // 1024
-        info(f"编译完成: {self.binary}  ({size_kb} KB)")
+        section("编译 (release)")
+        run(["cargo", "build", "--release"])
+        if self.release_binary.exists():
+            size_kb = self.release_binary.stat().st_size // 1024
+            info(f"编译完成: {self.release_binary}  ({size_kb} KB)")
+        else:
+            error("编译失败: 未找到二进制文件")
+            sys.exit(1)
 
         section("准备运行环境")
-        self._setup_env(self.app_dir)
-
-    # ------------------------------------------------------------------ #
-    # 环境准备（内部）
-    # ------------------------------------------------------------------ #
-
-    def _setup_env(self, home: Path):
-        workspace   = home / "workspace"
-        plugins_dir = home / "plugins"
-        config_path = home / "configs" / "config.yaml"
-
-        # 创建目录结构
-        for d in [home / "bin", home / "configs", home / "logs", workspace, plugins_dir]:
-            d.mkdir(parents=True, exist_ok=True)
-
-        # 复制二进制
-        dst_bin = home / "bin" / BINARY_NAME
-        shutil.copy2(self.binary, dst_bin)
-        dst_bin.chmod(0o755)
-
-        # 配置文件
-        self._handle_config(config_path, workspace, plugins_dir)
-
-        # 复制插件子目录（本工程 plugins/）
-        for subdir in ("persona", "memory", "skills"):
-            src = self.project_root / "plugins" / subdir
-            if src.is_dir():
-                dst = plugins_dir / subdir
-                if dst.exists():
-                    shutil.rmtree(dst)
-                shutil.copytree(src, dst)
+        self._setup_config()
 
         print()
         print("🦞 geekclaw is ready!")
         print()
-        print("Next steps:")
-        print(f"  1. Edit config:  {config_path}")
+        print("使用方法:")
+        print(f"  {self.release_binary} version     # 显示版本")
+        print(f"  {self.release_binary} agent       # 启动交互式 Agent")
         print()
-        print("  2. Run:")
-        print("       ./geekclaw.py gateway    # 启动 gateway 模式（接入 Telegram / Discord 等）")
-        print("       ./geekclaw.py agent      # 直接进入 agent 交互模式")
+        print("或者通过 cargo:")
+        print("  cargo run -- agent")
 
-    def _handle_config(self, config_path: Path, workspace: Path, plugins_dir: Path):
-        config_src = self.project_root / "templates" / "configs" / "config.example.yaml"
+    def _setup_config(self):
+        """如果 config.yaml 不存在，从 config.example.yaml 复制一份。"""
+        config_path = self.project_root / "config.yaml"
+        example_path = self.project_root / "config.example.yaml"
 
-        if not config_path.exists():
-            content = config_src.read_text()
-            content = content.replace("workspace: ~/.geekclaw/workspace", f"workspace: {workspace}")
-            content = content.replace("plugins_dir: ~/.geekclaw/plugins",  f"plugins_dir: {plugins_dir}")
-            config_path.write_text(content)
-            info(f"Config written: {config_path}")
-        elif re.search(r'^\s*restrict_to_plugins_dir:', config_path.read_text(), re.MULTILINE):
-            # 迁移旧配置
-            content = config_path.read_text()
-            content = re.sub(
-                r'(\s*plugins_dir:)',
-                f'    workspace: {workspace}\n\\1',
-                content, count=1,
-            )
-            content = re.sub(
-                r'(\s*)restrict_to_plugins_dir:',
-                r'\1restrict_to_workspace:',
-                content,
-            )
-            config_path.write_text(content)
-            info(f"Config migrated: {config_path}")
+        if config_path.exists():
+            info(f"配置文件已存在，跳过: {config_path}")
+        elif example_path.exists():
+            shutil.copy2(example_path, config_path)
+            info(f"已从模板创建配置文件: {config_path}")
+            info("请编辑 config.yaml 填写 API 密钥")
         else:
-            info(f"Config exists, skipped: {config_path}")
-
-    # ------------------------------------------------------------------ #
-    # clean
-    # ------------------------------------------------------------------ #
+            warn("未找到 config.example.yaml，跳过配置文件创建")
 
     def cmd_clean(self):
-        if self.build_dir.exists():
-            shutil.rmtree(self.build_dir)
-            info(f"已删除: {self.build_dir}")
-        run(["go", "clean", "-cache"])
-        if self.app_dir.exists():
-            shutil.rmtree(self.app_dir)
-            info(f"已删除: {self.app_dir}")
+        section("清理")
+        run(["cargo", "clean"])
+        info("已清理构建产物")
 
+    def cmd_test(self):
+        section("运行测试")
+        run(["cargo", "test"])
 
-# ---------------------------------------------------------------------------
-# 帮助信息
-# ---------------------------------------------------------------------------
-
-HELP = """\
-geekclaw 构建脚本（发布构建请使用 goreleaser）
-
-用法: ./manage.py <命令>
-
-命令:
-  build    生成并编译，准备 geekclaw-app/ 运行环境
-  clean    删除构建产物和 geekclaw-app/
-
-典型工作流:
-  ./manage.py build                    # 编译 + 准备 geekclaw-app/
-  vi geekclaw-app/configs/config.yaml  # 填写 API 密钥
-  ./geekclaw.py gateway                # 启动服务
-"""
+    def cmd_bench(self):
+        section("运行基准测试")
+        run(["cargo", "bench", "-p", "geekclaw-memory", "--bench", "jsonl_bench"])
 
 
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
+
+HELP = """\
+geekclaw 构建脚本
+
+用法: ./manage.py <命令>
+
+命令:
+  build    编译 release 二进制
+  clean    删除构建产物
+  test     运行所有测试
+  bench    运行性能基准测试
+
+典型工作流:
+  ./manage.py build                    # 编译
+  export OPENAI_API_KEY=sk-...         # 设置 API 密钥
+  ./target/release/geekclaw agent      # 启动 Agent
+"""
+
 
 def main():
     project_root = Path(__file__).resolve().parent
@@ -263,6 +148,8 @@ def main():
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("build", add_help=False)
     subparsers.add_parser("clean", add_help=False)
+    subparsers.add_parser("test",  add_help=False)
+    subparsers.add_parser("bench", add_help=False)
 
     args = parser.parse_args()
 
@@ -272,10 +159,15 @@ def main():
 
     builder = GeekclawBuilder(project_root)
 
-    if args.command == "build":
-        builder.cmd_build()
-    elif args.command == "clean":
-        builder.cmd_clean()
+    commands = {
+        "build": builder.cmd_build,
+        "clean": builder.cmd_clean,
+        "test":  builder.cmd_test,
+        "bench": builder.cmd_bench,
+    }
+
+    if args.command in commands:
+        commands[args.command]()
     else:
         error(f"未知命令: {args.command}")
         print("运行 './manage.py --help' 查看帮助")
