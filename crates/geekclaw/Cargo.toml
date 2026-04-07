@@ -1,0 +1,22 @@
+[package]
+name = "geekclaw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "geekclaw"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+geekclaw-agent = { workspace = true }
+geekclaw-bus = { workspace = true }
+geekclaw-config = { workspace = true }
+geekclaw-logger = { workspace = true }
+geekclaw-memory = { workspace = true }
+geekclaw-providers = { workspace = true }
+geekclaw-tools = { workspace = true }
